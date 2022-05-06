@@ -33,6 +33,7 @@ set(EXAMPLES
   generate_joint_velocity_motion
   grasp_object
   joint_impedance_control
+  freedrive_test
   joint_point_to_point_motion
   motion_with_control
   print_joint_poses
@@ -45,6 +46,7 @@ foreach(example ${EXAMPLES})
 endforeach()
 
 target_link_libraries(joint_impedance_control Threads::Threads)
+target_link_libraries(freedrive_test Threads::Threads)
 target_link_libraries(motion_with_control Poco::Foundation)
 
 include(GNUInstallDirs)
