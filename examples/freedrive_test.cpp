@@ -20,7 +20,6 @@
 #include <franka/rate_limiting.h>
 #include <franka/robot.h>
 
-#include "examples_common.h"
 // NOTE: requires motion-c
 #include <motionlib/so3.h>
 #include <motionlib/vectorops.h>
@@ -66,7 +65,7 @@ int main(int argc, char** argv) {
     return -1;
   }
   // Set print rate for comparing commanded vs. measured torques.
-  const double print_rate = 10.0;
+  const double print_rate = 2.0;
 
   // Initialize data fields for the print thread.
   struct {
@@ -75,13 +74,13 @@ int main(int argc, char** argv) {
     std::array<double, 7> tau_d_last;
     franka::RobotState robot_state;
     std::array<double, 7> gravity;
+    std::array<double, 7> gravity_orig;
     std::array<double, 7> coriolis;
   } print_data{};
   std::atomic_bool running{true};
 
   // Start print thread.
   std::thread print_thread([print_rate, &print_data, &running]() {
-    double position_error_accum = 0;
     while (running) {
       // Sleep to achieve the desired print rate.
       std::this_thread::sleep_for(
@@ -104,10 +103,11 @@ int main(int argc, char** argv) {
 
           // Print data to console
           std::cout << "gravity:  " << print_data.gravity << std::endl
-                    << "coriolis: " << print_data.coriolis << std::endl
+//                    << "coriolis: " << print_data.coriolis << std::endl
+                    << "grav_orij: " << print_data.gravity_orig << std::endl
                     << "config:   " << print_data.robot_state.q << std::endl
-                    << "torque:   " << print_data.robot_state.tau_J << std::endl
-                    << "torque_prev:   " << print_data.robot_state.tau_J_d << std::endl
+//                    << "torque:   " << print_data.robot_state.tau_J << std::endl
+//                    << "torque_prev:   " << print_data.robot_state.tau_J_d << std::endl
                     << "-----------------------" << std::endl;
 //          std::cout << "tau_error [Nm]: " << tau_error << std::endl
 //                    << "tau_commanded [Nm]: " << tau_d_actual << std::endl
@@ -121,35 +121,16 @@ int main(int argc, char** argv) {
     }
   });
 
+  //const std::array<double, 7> impedances = {{3000, 3000, 3000, 2500, 2500, 2000, 2000}};
+  //const std::array<double, 7> impedances = {{10000, 10000, 10000, 10000, 10000, 10000, 10000}};
+  const std::array<double, 7> impedances = {{150, 150, 150, 125, 125, 100, 100}};
+  // Connect to robot.
+  franka::Robot robot(argv[1]);
   try {
-    // Connect to robot.
-    franka::Robot robot(argv[1]);
 
-    // First move the robot to a suitable joint configuration
-//    std::array<std::array<double, 7>, 2> q_goals = {{
-//        {{0, -M_PI_4, 0, -3 * M_PI_4, 0, M_PI_2, M_PI_4}},
-//        {{-M_PI_4, -M_PI_4, 0, -3 * M_PI_4, 0, M_PI_2, M_PI_4}}
-//    }};
-    std::array<std::array<double, 7>, 1> q_goals = {{
-        {{0, -M_PI_4, 0, -3 * M_PI_4, 0, M_PI_2, M_PI_4}}
-    }};
-    std::vector<franka::RobotState> calib_states;
-    std::vector<std::array<double, 7>> calib_torques;
-
-    for (auto q_goal : q_goals) {
-//        MotionGenerator motion_generator(0.25, q_goal);
-//        std::cout << "WARNING: This example will move the robot! "
-//                  << "Please make sure to have the user stop button at hand!" << std::endl
-//                  << "Press Enter to continue..." << std::endl;
-//        std::cin.ignore();
-//        robot.control(motion_generator);
-//        sleep(1);   // wait for motion to stop
-//        std::cout << "Finished moving to initial joint configuration." << std::endl;
-        franka::RobotState calib_state = robot.readOnce();
-        std::cout << calib_state << std::endl;
-        calib_states.push_back(calib_state);
-        calib_torques.push_back(calib_state.tau_J);
-    }
+    franka::RobotState calib_state = robot.readOnce();
+    std::cout << calib_state << std::endl;
+    auto calib_torque = calib_state.tau_J;
 
     // Set additional parameters always before the control loop, NEVER in the control loop!
     // Set collision behavior.
@@ -167,7 +148,7 @@ int main(int argc, char** argv) {
                                {{1000.0, 1000.0, 1000.0, 1000.0, 1000.0, 1000.0}},
                                {{1000.0, 1000.0, 1000.0, 1000.0, 1000.0, 1000.0}});
     robot.automaticErrorRecovery();
-    //robot.setJointImpedance({{3000, 3000, 3000, 2500, 2500, 2000, 2000}});
+    //robot.setJointImpedance(impedances);
     //robot.setCartesianImpedance({{3000, 3000, 3000, 300, 300, 300}});
     //setDefaultBehavior(robot);
 
@@ -183,25 +164,17 @@ int main(int argc, char** argv) {
     int fail_threshold = 500;
     double step_size_threshold = 0.001;     // stop optimizing when step size goes below this
     double step_size_multiplier = 0.5;      // geometric decrease
-    int max_steps = 100;     // why not
+    int max_steps = 10;     // why not
     double best_error = 0;
-    {
-        for (size_t i = 0; i < calib_states.size(); ++i) {
-            auto calib_state = calib_states[i];
-            auto calib_torque = calib_torques[i];
-            std::array<double, 7> gravity_torques = model.gravity(calib_state);
-            double tmp[7];
-            __vo_subv(tmp, gravity_torques.data(), calib_torque.data(), 7);
-            best_error += __vo_normSquared(tmp, 7);
-        }
-    }
+
+    std::array<double, 7> gravity_torques = model.gravity(calib_state);
+    double tmp[7];
+    __vo_subv(tmp, gravity_torques.data(), calib_torque.data(), 7);
+    best_error += __vo_normSquared(tmp, 7);
+
     std::cout << "initial error: " << best_error << std::endl;
-    for (size_t i = 0; i < calib_states.size(); ++i) {
-        auto calib_state = calib_states[i];
-        auto calib_torque = calib_torques[i];
-        std::cout << "Measured: " << calib_torque << std::endl
-                  << "Predicted: " << model.gravity(calib_state, gravity_dir) << std::endl;
-    }
+    std::cout << "Measured: " << calib_torque << std::endl
+              << "Predicted: " << model.gravity(calib_state, gravity_dir) << std::endl;
     while (true) {
         std::array<double, 3> rotation_axis = random_direction();
         double rotation_matrix[9];
@@ -218,13 +191,9 @@ int main(int argc, char** argv) {
 
             double tmp_error = 0;
             std::array<double, 7> gravity_torques;
-            for (size_t i = 0; i < calib_states.size(); ++i) {
-                auto calib_state = calib_states[i];
-                auto calib_torque = calib_torques[i];
-                gravity_torques = model.gravity(calib_state, test_gravity);
-                __vo_subv(tmp, gravity_torques.data(), calib_torque.data(), 7);
-                tmp_error += __vo_normSquared(tmp, 7);
-            }
+            gravity_torques = model.gravity(calib_state, test_gravity);
+            __vo_subv(tmp, gravity_torques.data(), calib_torque.data(), 7);
+            tmp_error += __vo_normSquared(tmp, 7);
             if (tmp_error < best_error) {
                 found_better = true;
                 error = tmp_error;
@@ -256,15 +225,9 @@ int main(int argc, char** argv) {
 
     __vo_mul(gravity_dir.data(), gravity_dir.data(), gravity_amount, 3);
     std::cout << "Calibrated gravity vector." << std::endl;
-    //gravity_dir = {0, 9.81, 0};
     std::cout << "Check gravity vector: " << gravity_dir << std::endl;
-
-    for (size_t i = 0; i < calib_states.size(); ++i) {
-        auto calib_state = calib_states[i];
-        auto calib_torque = calib_torques[i];
-        std::cout << "Measured: " << calib_torque << std::endl
-                  << "Predicted: " << model.gravity(calib_state, gravity_dir) << std::endl;
-    }
+    std::cout << "Measured: " << calib_torque << std::endl
+              << "Predicted: " << model.gravity(calib_state, gravity_dir) << std::endl;
     std::cout << "Error: " << best_error << std::endl
               << "Press Enter to continue..." << std::endl;
     std::cin.ignore();
@@ -277,26 +240,16 @@ int main(int argc, char** argv) {
     //const std::array<double, 7> d_gains = {{50.0, 50.0, 50.0, 50.0, 30.0, 25.0, 15.0}};
     const std::array<double, 7> d_gains = {{5.0, 5.0, 5.0, 5.0, 3.0, 2.50, 1.50}};
 
-    auto q_target = calib_states[0].q;
+    auto q_target = calib_state.q;
 
-    double run_time = 10;
+    double run_time = 120;
     double time = 0.0;
-
-    std::function<franka::JointPositions(const franka::RobotState&, franka::Duration)>
-        joint_pos_callback = [&time, run_time](const franka::RobotState& state, franka::Duration period) -> franka::JointPositions {
-
-      time += period.toSec();
-      if (time >= run_time) {
-        return franka::MotionFinished(franka::JointPositions(state.q));
-      }
-      return state.q;
-    };
 
     // Define callback for the joint torque control loop.
     std::function<franka::Torques(const franka::RobotState&, franka::Duration)>
         impedance_control_callback =
             [&print_data, &model, &gravity_dir, &q_target, k_gains, d_gains](
-                const franka::RobotState& state, franka::Duration period) -> franka::Torques {
+                const franka::RobotState& state, franka::Duration /*period*/) -> franka::Torques {
       //std::cout << state.q_d << std::endl;
       // Read current coriolis terms from model.
       std::array<double, 7> coriolis = model.coriolis(state);
@@ -310,7 +263,7 @@ int main(int argc, char** argv) {
       for (size_t i = 0; i < 7; i++) {
         tau_d_calculated[i] =
             k_gains[i] * (q_target[i] - state.q[i]) - d_gains[i] * state.dq[i]
-            + coriolis[i] - gravity_original[i] + gravity_mod[i];
+            /*+ coriolis[i]*/ - gravity_original[i] + gravity_mod[i];
       }
       q_target = state.q;
 
@@ -327,6 +280,7 @@ int main(int argc, char** argv) {
         print_data.robot_state = state;
         print_data.tau_d_last = tau_d_rate_limited;
         print_data.gravity = gravity_mod;
+        print_data.gravity_orig = gravity_original;
         print_data.coriolis = coriolis;
         print_data.mutex.unlock();
       }
@@ -336,8 +290,7 @@ int main(int argc, char** argv) {
     };
 
     // Start real-time control loop.
-    robot.control(impedance_control_callback, joint_pos_callback, false);
-
+    robot.control(impedance_control_callback);
   } catch (const franka::Exception& ex) {
     running = false;
     std::cerr << ex.what() << std::endl;
